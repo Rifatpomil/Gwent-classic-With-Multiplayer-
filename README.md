@@ -59,7 +59,7 @@ Gwent music tracks are integrated and can be toggled via the music icon.
 2. **Share the URL** with your friend.
 3. Both open the **same URL** in their browsers.
 4. Follow the same room code steps above.
-5. Play from anywhere in the world! 🌍
+5. Play from anywhere in the world!
 
 ### Single Player Mode
 1. Customize your deck in the customization screen.
@@ -69,7 +69,7 @@ Gwent music tracks are integrated and can be toggled via the music icon.
 
 ## Hosting Options
 
-### Option 1: Host on Render (Free — Recommended ⭐)
+### Option 1: Host on Render (Free — Recommended)
 Host your own instance for free in ~5 minutes:
 
 1. **Fork this repository** (click Fork on GitHub top right)
@@ -86,7 +86,7 @@ Host your own instance for free in ~5 minutes:
 | **Instance Type** | Free |
 
 6. Click **"Create Web Service"**
-7. Wait ~3 minutes → Get your own free URL! 🎉
+7. Wait ~3 minutes → Get your own free URL!
 
 >  **Keep it awake for free:** Use [UptimeRobot](https://uptimerobot.com) to ping your URL every 5 minutes — prevents the free tier from sleeping!
 > 1. Sign up free at uptimerobot.com
