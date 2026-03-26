@@ -8,7 +8,6 @@ class Network {
         this.playerIndex = null;
         this.isMultiplayer = false;
         this.randomQueue = [];
-
         this.setupListeners();
     }
 
@@ -16,7 +15,6 @@ class Network {
         this.socket.on('joined_room', (data) => {
             this.playerIndex = data.playerIndex;
             console.log(`Joined room as player ${this.playerIndex}`);
-            // Wait for another player
         });
 
         this.socket.on('player_joined', (player) => {
@@ -58,19 +56,15 @@ class Network {
 
     startGame(players) {
         console.log('Starting network game with players:', players);
-        // Hide multiplayer setup
         document.getElementById('multiplayer-setup').classList.add('hide');
         document.getElementById('deck-customization').classList.add('hide');
 
-        // Initialize players based on network data
         const myData = players[this.playerIndex];
         const opData = players[1 - this.playerIndex];
 
-        // Refactor gwent.js to use these players
         window.player_me = new Player(0, myData.name, myData.deck);
         window.player_op = new Player(1, opData.name, opData.deck);
-        
-        // Change opponent's controller to remote
+
         window.player_op.controller = new ControllerRemote(window.player_op);
 
         game.startGame();
@@ -92,97 +86,193 @@ class ControllerRemote {
 
     async startTurn(player) {
         console.log("Waiting for remote move...");
-        // This controller waits for receiveMove to be called by Network
     }
 
     async receiveMove(move) {
         console.log(`ControllerRemote: received move ${move.type} for card ${move.cardName}`);
         switch (move.type) {
-            case 'play_card':
-                // Check hand by index first if provided
-                let card = null;
-                if (typeof move.handIndex !== 'undefined' && move.handIndex !== -1) {
-                    card = this.player.hand.cards[move.handIndex];
-                }
-                
-                // Fallback to name search if index failed or wasn't provided
-                if (!card || card.name !== move.cardName) {
-                    card = this.player.hand.cards.find(c => c.name === move.cardName);
-                }
-                
-                // If still not in hand, check other containers
+
+            case 'play_card': {
+                // Search by name first — most reliable across rounds
+                let card = this.player.hand.cards.find(c => c.name === move.cardName);
+
+                // Fallback: search deck
                 if (!card) {
                     card = this.player.deck.cards.find(c => c.name === move.cardName);
                 }
-                
+
+                // Last resort: use hand index
+                if (!card && typeof move.handIndex !== 'undefined' && move.handIndex !== -1) {
+                    card = this.player.hand.cards[move.handIndex];
+                }
+
                 if (card) {
+                    console.log(`Playing card: ${card.name}, rowName: ${move.rowName}`);
                     if (move.rowName) {
-                        const row = board.getRow(card, move.rowName, this.player);
+                        const row = move.rowName === "weather"
+                            ? weather
+                            : board.getRow(card, move.rowName, this.player);
                         await this.player.playCardToRow(card, row);
-                    } else if (card.name === "Scorch") {
-                        await this.player.playScorch(card);
                     } else {
                         await this.player.playCard(card);
                     }
                 } else {
                     console.error("Remote card not found:", move.cardName);
-                    // Force turn end if card missing to prevent soft-lock
                     this.player.endTurn();
                 }
                 break;
+            }
+
+            case 'scorch': {
+                let scorchCard = this.player.hand.cards.find(c => c.name === move.cardName);
+                if (!scorchCard && typeof move.handIndex !== 'undefined' && move.handIndex !== -1) {
+                    scorchCard = this.player.hand.cards[move.handIndex];
+                }
+                if (scorchCard) {
+                    await this.player.playScorch(scorchCard);
+                } else {
+                    console.error("Remote scorch card not found:", move.cardName);
+                    this.player.endTurn();
+                }
+                break;
+            }
+
             case 'pass':
                 await this.player.passRound();
                 break;
+
             case 'activate_leader':
                 await this.player.activateLeader();
                 break;
+
             case 'coin_toss':
-                // firstPlayerAbsIndex is absolute (0=host, 1=guest); compare to our own playerIndex
-                game.firstPlayer = (move.firstPlayerAbsIndex === window.network.playerIndex) ? player_me : player_op;
+                game.firstPlayer = (move.firstPlayerAbsIndex === window.network.playerIndex)
+                    ? player_me
+                    : player_op;
                 break;
+
             case 'ready_to_start':
                 game.opponentReady = true;
                 break;
+
             case 'sync_random':
                 window.network.randomQueue.push(move.value);
                 break;
+
             case 'sync_deck': {
-                 // playerAbsIndex is absolute (0=host, 1=guest); map to local player_me/player_op
-                 const targetPlayer = (move.playerAbsIndex === window.network.playerIndex) ? player_me : player_op;
-                 // Reset first to clear both the cards array and the DOM deck-back elements
-                 targetPlayer.deck.reset();
-                 move.indices.forEach(index => {
-                     const card = new Card(card_dict[index], targetPlayer);
-                     targetPlayer.deck.cards.push(card);
-                     targetPlayer.deck.addCardElement();
-                 });
-                 targetPlayer.deck.resize();
-                 if (targetPlayer === player_me) game.meDeckSynced = true;
-                 else game.opDeckSynced = true;
-                 break;
-            }
-            case 'redraw':
-                // Handle initial redraw synchronization
+                const targetPlayer = (move.playerAbsIndex === window.network.playerIndex)
+                    ? player_me
+                    : player_op;
+                targetPlayer.deck.reset();
+                move.indices.forEach(index => {
+                    const card = new Card(card_dict[index], targetPlayer);
+                    targetPlayer.deck.cards.push(card);
+                    targetPlayer.deck.addCardElement();
+                });
+                targetPlayer.deck.resize();
+                if (targetPlayer === player_me) game.meDeckSynced = true;
+                else game.opDeckSynced = true;
                 break;
-            case 'decoy':
-                const targetCard = this.player.opponent().hand.cards.find(c => c.name === move.cardName) || 
-                                 board.row.flatMap(r => r.cards).find(c => c.name === move.cardName);
-                const decoyCard = this.player.hand.cards.find(c => c.name === move.decoyCardName);
+            }
+
+            case 'sync_redraw': {
+                // Rebuild opponent's deck and hand after their redraw
+                const targetPlayer = (move.playerAbsIndex === window.network.playerIndex)
+                    ? player_me
+                    : player_op;
                 
-                if (targetCard && decoyCard) {
-                    const row = board.getRow(decoyCard, move.rowName, this.player);
-                    board.toHand(targetCard, row);
-                    await board.moveTo(decoyCard, row, this.player.hand);
+                // Rebuild deck
+                targetPlayer.deck.reset();
+                move.deckIndices.forEach(index => {
+                    const card = new Card(card_dict[index], targetPlayer);
+                    targetPlayer.deck.cards.push(card);
+                    targetPlayer.deck.addCardElement();
+                });
+                targetPlayer.deck.resize();
+                
+                // Rebuild hand
+                const oldHand = [...targetPlayer.hand.cards];
+                targetPlayer.hand.cards = [];
+                move.handCards.forEach(hc => {
+                    // Try to find matching card from old hand first (preserves object identity)
+                    let card = oldHand.find(c => c.name === hc.name && c.filename === hc.filename);
+                    if (card) {
+                        oldHand.splice(oldHand.indexOf(card), 1);
+                    } else {
+                        // Card was drawn during redraw — create new one
+                        const cardData = card_dict.find(cd => cd.name === hc.name && cd.filename === hc.filename);
+                        card = new Card(cardData, targetPlayer);
+                    }
+                    targetPlayer.hand.cards.push(card);
+                });
+                targetPlayer.hand.resize();
+                
+                console.log(`Synced redraw for player ${move.playerAbsIndex}: deck=${move.deckIndices.length}, hand=${move.handCards.length}`);
+                break;
+            }
+
+            case 'redraw':
+                break;
+
+            case 'medic': {
+                // Handle medic card revival on remote side
+                const medicTarget = this.player.grave.cards.find(c => c.name === move.targetCardName);
+                if (medicTarget) {
+                    await medicTarget.autoplay(this.player.grave);
+                } else {
+                    console.error('Medic target not found:', move.targetCardName);
+                }
+                break;
+            }
+
+            case 'decoy': {
+                //  Use rowName to find the correct row, then find the card in it
+                let targetCard = null;
+                let targetRow = null;
+                if (move.rowName) {
+                    targetRow = board.getRow({abilities:[]}, move.rowName, this.player);
+                    if (targetRow) {
+                        targetCard = targetRow.cards.find(c => c.name === move.cardName);
+                    }
+                }
+                // Fallback: search all rows if rowName didn't resolve
+                if (!targetCard) {
+                    for (let r of board.row) {
+                        const found = r.cards.find(c => c.name === move.cardName);
+                        if (found) {
+                            targetCard = found;
+                            targetRow = r;
+                            break;
+                        }
+                    }
+                }
+                const decoyCard = this.player.hand.cards.find(c => c.name === move.decoyCardName);
+                if (targetCard && decoyCard && targetRow) {
+                    // Reset holder + clear placed so spy cards dont retrigger
+                    targetCard.holder = this.player;
+                    const savedPlaced = targetCard.placed;
+                    targetCard.placed = [];
+                    await board.toHand(targetCard, targetRow);
+                    targetCard.placed = savedPlaced;
+                    await board.moveTo(decoyCard, targetRow, this.player.hand);
+                    this.player.endTurn();
+                } else {
+                    console.error('Decoy failed:', {
+                        targetCard: move.cardName,
+                        decoyCard: move.decoyCardName,
+                        found: !!targetCard
+                    });
                     this.player.endTurn();
                 }
                 break;
-        }
-    }
-}
+            }
+
+        } // closes switch
+    }     // closes receiveMove
+}         // closes ControllerRemote
 
 window.network = new Network();
 
-// Add event listeners for the multiplayer UI
 document.addEventListener('DOMContentLoaded', () => {
     const multiplayerSetup = document.getElementById('multiplayer-setup');
     const joinBtn = document.getElementById('join-room-btn');
@@ -202,31 +292,31 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     joinBtn.addEventListener('click', () => {
-         const roomCode = String(roomInput.value.trim());
-         const playerName = nameInput.value.trim() || 'Player';
-         
-         if (!roomCode) {
-             alert('Please enter a room code');
-             return;
-         }
+        const roomCode = String(roomInput.value.trim());
+        const playerName = nameInput.value.trim() || 'Player';
 
-         console.log('Attempting to join room:', roomCode, 'as', playerName);
+        if (!roomCode) {
+            alert('Please enter a room code');
+            return;
+        }
 
-         if (typeof dm === 'undefined') {
-             alert('Game engine not loaded yet. Please wait a moment.');
-             return;
-         }
+        console.log('Attempting to join room:', roomCode, 'as', playerName);
 
-         const deck = dm.getDeckData();
-         if (!deck) {
-             console.log('Deck validation failed');
-             return;
-         }
+        if (typeof dm === 'undefined') {
+            alert('Game engine not loaded yet. Please wait a moment.');
+            return;
+        }
 
-         console.log('Deck validated, joining room...');
-         window.network.joinRoom(roomCode, playerName, deck);
-         
-         joinBtn.innerText = 'Waiting for opponent...';
-         joinBtn.disabled = true;
-     });
+        const deck = dm.getDeckData();
+        if (!deck) {
+            console.log('Deck validation failed');
+            return;
+        }
+
+        console.log('Deck validated, joining room...');
+        window.network.joinRoom(roomCode, playerName, deck);
+
+        joinBtn.innerText = 'Waiting for opponent...';
+        joinBtn.disabled = true;
+    });
 });

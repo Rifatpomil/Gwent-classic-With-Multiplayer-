@@ -532,7 +532,7 @@ class Player {
 	async playScorch(card){
 		if (this === player_me && network.isMultiplayer) {
 			const handIndex = this.hand.cards.indexOf(card);
-			network.sendMove({ type: 'play_card', cardName: card.name, handIndex: handIndex });
+			network.sendMove({ type: 'scorch', cardName: card.name, handIndex: handIndex });
 		}
 		await this.playCardAction(card, async () => await ability_dict["scorch"].activated(card));
 	}
@@ -546,9 +546,9 @@ class Player {
 				rowName = "weather";
 			} else {
 				const rowIndex = board.row.indexOf(row);
-				if (rowIndex === 1 || rowIndex === 4) rowName = "ranged";
-				else if (rowIndex === 0 || rowIndex === 5) rowName = "siege";
-				else rowName = "close";
+				if (rowIndex === 0 || rowIndex === 5) rowName = "siege";
+                else if (rowIndex === 1 || rowIndex === 4) rowName = "ranged";
+                else if (rowIndex === 2 || rowIndex === 3) rowName = "close";
 			}
 			
 			const handIndex = this.hand.cards.indexOf(card);
@@ -598,15 +598,15 @@ class Player {
 	
 	// Tells the the Player if it won the round. May damage health.
 	endRound(win){
-		if (!win) {
-			if (this.health < 1)
-				return;
-			document.getElementById("gem" + this.health + "-" +this.tag).classList.remove("gem-on");
-			this.health--;
-		}
-		this.setPassed(false);
-		this.setWinning(false);
-	}
+    if (!win) {
+        if (this.health < 1)
+            return;
+        document.getElementById("gem" + this.health + "-" +this.tag).classList.remove("gem-on");
+        this.health--;
+    }
+    this.setPassed(false);
+    this.setWinning(false);
+}
 	
 	// Returns true if the Player can make any action other than passing
 	canPlay() {
@@ -764,7 +764,7 @@ class CardContainer {
 	addCardElement(card, index){
 		if (this.elem){
 			if (index === this.cards.length)
-				thise.elem.appendChild(card.elem);
+				this.elem.appendChild(card.elem);
 			else
 				this.elem.insertBefore(card.elem, this.elem.children[index]);
 		}
@@ -1422,6 +1422,17 @@ class Game {
 	async initialRedraw(){
 		if (network.isMultiplayer) {
 			await ui.queueCarousel(player_me.hand, 2, async (c, i) => await player_me.deck.swap(c, c.removeCard(i)), c => true, true, true, "Choose up to 2 cards to redraw.");
+			
+			// Sync deck and hand after redraw so opponent has correct state
+			const deckIndices = player_me.deck.cards.map(c => card_dict.findIndex(cd => cd.name === c.name && cd.filename === c.filename));
+			const handNames = player_me.hand.cards.map(c => ({name: c.name, filename: c.filename}));
+			network.sendMove({ 
+				type: 'sync_redraw', 
+				deckIndices: deckIndices, 
+				handCards: handNames,
+				playerAbsIndex: network.playerIndex 
+			});
+			
 			network.sendMove({ type: 'ready_to_start' });
 			ui.enablePlayer(false);
 			
@@ -1499,7 +1510,6 @@ class Game {
 		
 		board.row.forEach( row => row.clear() );
 		weather.clearWeather();
-		
 		player_me.endRound( dif > 0);
 		player_op.endRound( dif < 0);
 		
@@ -1850,27 +1860,29 @@ class UI {
 			this.setSelectable(null, false);
 			this.showPreview(card);
 		} else if (pCard.name === "Decoy") {
-			if (pCard.holder === player_me && network.isMultiplayer) {
-				let rowName = 'close';
-				if (row.elem_parent.classList.contains('field-row')) {
-					const rowIndex = board.row.indexOf(row);
-					if (rowIndex === 1 || rowIndex === 4) rowName = "ranged";
-					else if (rowIndex === 0 || rowIndex === 5) rowName = "siege";
-					else rowName = "close";
-				}
-				network.sendMove({ 
-					type: 'decoy', 
-					cardName: card.name, // The card being swapped back to hand
-					decoyCardName: pCard.name, 
-					rowName: rowName 
-				});
-			}
-			this.hidePreview(card);
-			this.enablePlayer(false);
-			board.toHand(card, row);
-			await board.moveTo(pCard, row, pCard.holder.hand);
-			pCard.holder.endTurn();
-		}
+      	  if (pCard.holder === player_me && network.isMultiplayer) {
+        	const rowIndex = board.row.indexOf(row);
+       	 let rowName = 'close';
+       	 if (rowIndex === 0 || rowIndex === 5) rowName = "siege";
+       	 else if (rowIndex === 1 || rowIndex === 4) rowName = "ranged";
+       	 else if (rowIndex === 2 || rowIndex === 3) rowName = "close";
+       	 network.sendMove({ 
+          	type: 'decoy', 
+         	cardName: card.name,
+         	decoyCardName: pCard.name, 
+            rowName: rowName 
+        });
+    }
+   this.hidePreview(card);
+   this.enablePlayer(false);
+   card.holder = player_me;
+   const savedPlaced = card.placed;
+   card.placed = [];
+   await board.toHand(card, row);
+   card.placed = savedPlaced;
+   await board.moveTo(pCard, row, pCard.holder.hand);
+   pCard.holder.endTurn();
+}
 	}
 	
 	// Called when the player selects a selectable CardContainer
@@ -2772,25 +2784,40 @@ function isString(s){
 
 // Returns a random integer in the range [0, n)
 function randomInt(n) {
-	if (window.network && network.isMultiplayer) {
-		// In multiplayer, host (playerIndex 0) decides and syncs
-		if (network.playerIndex === 0) {
-			const res = Math.floor(Math.random() * n);
-			network.sendMove({ type: 'sync_random', value: res });
-			return res;
-		} else {
-			// This is tricky because randomInt is called synchronously
-			// We'll need a queue of random numbers from the host
-			if (network.randomQueue && network.randomQueue.length > 0) {
-				return network.randomQueue.shift();
-			}
-			// Fallback (might cause desync)
-			return Math.floor(Math.random() * n);
-		}
-	}
-	return Math.floor(Math.random() * n);
+    if (window.network && network.isMultiplayer) {
+        if (network.playerIndex === 0) {
+            const res = Math.floor(Math.random() * n);
+            network.sendMove({ type: 'sync_random', value: res });
+            return res;
+        } else {
+            if (network.randomQueue && network.randomQueue.length > 0) {
+                return network.randomQueue.shift();
+            }
+            // Fallback: generate locally to avoid hard crash, but log warning
+            console.warn('randomQueue empty — using local random (possible desync)');
+            return Math.floor(Math.random() * n);
+        }
+    }
+    return Math.floor(Math.random() * n);
 }
 
+// Async version of randomInt — waits for synced value from host.
+// Use this for code that both clients execute simultaneously (e.g., faction abilities at round boundaries).
+async function asyncRandomInt(n) {
+    if (window.network && network.isMultiplayer) {
+        if (network.playerIndex === 0) {
+            const res = Math.floor(Math.random() * n);
+            network.sendMove({ type: 'sync_random', value: res });
+            return res;
+        } else {
+            while (!network.randomQueue || network.randomQueue.length === 0) {
+                await sleep(50);
+            }
+            return network.randomQueue.shift();
+        }
+    }
+    return Math.floor(Math.random() * n);
+}
 // Pauses execution until the passed number of milliseconds as expired
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));

@@ -121,27 +121,43 @@ var ability_dict = {
 		}
 	},
 	medic: {
-		name: "medic",
-		description: "Choose one card from your discard pile and play it instantly (no Heroes or Special Cards). ",
-		placed: async (card) => {
-			let grave = board.getRow(card, "grave", card.holder);
-			let units = card.holder.grave.findCards(c => c.isUnit());
-			if (units.length <= 0)
-				return;
-			let wrapper = {card : null};
-			if (game.randomRespawn) {
-				 wrapper.card = grave.findCardsRandom(c => c.isUnit())[0];
-			} else if (card.holder.controller instanceof ControllerAI)
-				wrapper.card =  card.holder.controller.medic(card, grave);
-			else
-				await ui.queueCarousel(card.holder.grave, 1, (c, i) => wrapper.card=c.cards[i], c => c.isUnit(), true);
-			let res = wrapper.card;
-			grave.removeCard(res);
-			grave.addCard(res);
-			await res.animate("medic");
-			await res.autoplay(grave);
-		}
-	},
+    name: "medic",
+    description: "Choose one card from your discard pile and play it instantly (no Heroes or Special Cards). ",
+    placed: async (card) => {
+        let grave = board.getRow(card, "grave", card.holder);
+        let units = card.holder.grave.findCards(c => c.isUnit());
+        if (units.length <= 0)
+            return;
+        let wrapper = {card : null};
+        if (game.randomRespawn) {
+            wrapper.card = grave.findCardsRandom(c => c.isUnit())[0];
+        } else if (card.holder.controller instanceof ControllerAI) {
+            wrapper.card = card.holder.controller.medic(card, grave);
+        } else if (card.holder.controller instanceof ControllerRemote) {
+            // FIXED: Remote medic — wait for network to tell us which card
+            // Do nothing here — handled by network.js medic case
+            return;
+        } else {
+            // Local player — show carousel and send choice over network
+            await ui.queueCarousel(card.holder.grave, 1, (c, i) => {
+                wrapper.card = c.cards[i];
+            }, c => c.isUnit(), true);
+            // Send medic choice to opponent
+            if (network.isMultiplayer && wrapper.card) {
+                network.sendMove({
+                    type: 'medic',
+                    targetCardName: wrapper.card.name
+                });
+            }
+        }
+        if (!wrapper.card) return;
+        let res = wrapper.card;
+        grave.removeCard(res);
+        grave.addCard(res);
+        await res.animate("medic");
+        await res.autoplay(grave);
+    }
+},
 	morale: {
 		name: "Morale",
 		description: "Adds +1 to all units in the row (excluding itself). ",
