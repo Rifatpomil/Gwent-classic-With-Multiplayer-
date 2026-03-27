@@ -863,7 +863,7 @@ class Deck extends CardContainer {
 		this.initialize( card_id_list.reduce((a,c) => a.concat(clone(c.count, card_dict[c.index])), []), player);
 		function clone(n ,elem) { for (var  i=0, a=[]; i<n; ++i) a.push(elem); return a; }
 		
-		if (network.isMultiplayer) {
+		if (network.isMultiplayer && !game.isReplay) {
 			if (network.playerIndex === 0) {
 				// player.id is set before reset() is called in the constructor, so it's safe to use here.
 				// player_me always has id=0, player_op has id=1.
@@ -1552,25 +1552,76 @@ class Game {
 			endScreen.children[0].classList.add("end-lose");
 		}
 		
+		// Reset replay button state for this end screen
+		this.replay_elem.innerText = 'Replay';
+		this.replay_elem.disabled = false;
+		
+		if (network.isMultiplayer) {
+			this.customize_elem.innerText = 'Exit';
+		} else {
+			this.customize_elem.innerText = 'Customize';
+		}
+		
 		fadeIn(endScreen, 300);
 		ui.enablePlayer(true);
 	}
 	
 	// Returns the client to the deck customization screen
 	returnToCustomization(){
+		const wasMultiplayer = network.isMultiplayer;
+		if (wasMultiplayer) {
+			network.leaveRoom();
+		}
 		this.reset();
 		player_me.reset();
 		player_op.reset();
 		ui.toggleMusic_elem.classList.add("music-customization");
 		this.endScreen.classList.add("hide");
 		document.getElementById("deck-customization").classList.remove("hide");
+		
+		if (wasMultiplayer) {
+			// Reset the join button so player can re-enter a room code
+			const joinBtn = document.getElementById('join-room-btn');
+			if (joinBtn) {
+				joinBtn.innerText = 'Join/Create Room';
+				joinBtn.disabled = false;
+			}
+		}
 	}
 	
-	// Restarts the last game with the dame decks
-	restartGame(){
+	// Restarts the last game with the same decks
+	restartGame(serverConfirmed){
+		if (network.isMultiplayer && !serverConfirmed) {
+			// Request replay — wait for server to confirm both players ready
+			network.requestReplay();
+			this.replay_elem.innerText = 'Waiting for opponent...';
+			this.replay_elem.disabled = true;
+			return;
+		}
+		this.isReplay = true;
 		this.reset();
 		player_me.reset();
 		player_op.reset();
+		this.isReplay = false;
+		
+		if (network.isMultiplayer) {
+			if (network.playerIndex === 0) {
+				// Host: re-sync deck order to guest after replay reset.
+				// Each client shuffles independently via addCardRandom(), so decks
+				// diverge without this. Send the host's deck order as ground truth.
+				[player_me, player_op].forEach(player => {
+					const indices = player.deck.cards.map(c => card_dict.findIndex(cd => cd.name === c.name));
+					const playerAbsIndex = (player === player_me) ? network.playerIndex : 1 - network.playerIndex;
+					network.sendMove({ type: 'sync_deck', playerAbsIndex: playerAbsIndex, indices: indices });
+				});
+				this.meDeckSynced = true;
+				this.opDeckSynced = true;
+			}
+			// Guest: flags stay false — startGame() will wait for host's sync_deck.
+			// No deadlock: JS is single-threaded, so the guest finishes resetting
+			// before the event loop processes the host's sync_deck messages.
+		}
+		
 		this.endScreen.classList.add("hide");
 		this.startGame();
 	}

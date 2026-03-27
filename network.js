@@ -39,12 +39,42 @@ class Network {
             alert('Opponent disconnected');
             location.reload();
         });
+
+        this.socket.on('start_replay', () => {
+            console.log('Both players ready — restarting game');
+            game.restartGame(true); // true = confirmed by server
+        });
+
+        this.socket.on('replay_waiting', () => {
+            console.log('Waiting for opponent to accept replay...');
+            if (game.replay_elem) {
+                game.replay_elem.innerText = 'Waiting for opponent...';
+                game.replay_elem.disabled = true;
+            }
+        });
     }
 
     joinRoom(roomCode, playerName, deck) {
         this.roomCode = roomCode;
         this.playerName = playerName;
         this.socket.emit('join_room', { roomCode, playerName, deck });
+    }
+
+    requestReplay() {
+        if (this.isMultiplayer && this.roomCode) {
+            this.socket.emit('request_replay', { roomCode: this.roomCode });
+        }
+    }
+
+    leaveRoom() {
+        if (this.roomCode) {
+            this.socket.emit('leave_room', { roomCode: this.roomCode });
+        }
+        this.roomCode = null;
+        this.playerName = null;
+        this.playerIndex = null;
+        this.isMultiplayer = false;
+        this.randomQueue = [];
     }
 
     sendMove(move) {

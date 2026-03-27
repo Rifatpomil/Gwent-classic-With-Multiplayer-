@@ -69,6 +69,46 @@ io.on('connection', (socket) => {
         socket.broadcast.to(roomCode).emit('remote_move', move);
     });
 
+    socket.on('request_replay', (data) => {
+        const { roomCode } = data;
+        const room = rooms.get(roomCode);
+        if (!room) return;
+
+        if (!room.replayReady) room.replayReady = new Set();
+        room.replayReady.add(socket.id);
+        console.log(`Player ${socket.id} requested replay in room ${roomCode}. Ready: ${room.replayReady.size}/2`);
+
+        if (room.replayReady.size >= 2) {
+            console.log(`Both players ready — starting replay in room ${roomCode}`);
+            room.replayReady.clear();
+            io.to(roomCode).emit('start_replay');
+        } else {
+            // Let the requesting player know they're waiting
+            socket.emit('replay_waiting');
+        }
+    });
+
+    socket.on('leave_room', (data) => {
+        const { roomCode } = data;
+        const room = rooms.get(roomCode);
+        if (!room) return;
+
+        const index = room.players.findIndex(p => p.id === socket.id);
+        if (index !== -1) {
+            room.players.splice(index, 1);
+            socket.leave(roomCode);
+            console.log(`Player ${socket.id} left room ${roomCode}`);
+
+            if (room.players.length === 0) {
+                rooms.delete(roomCode);
+            } else {
+                // Clear replay state so remaining player isn't stuck
+                if (room.replayReady) room.replayReady.clear();
+                io.to(roomCode).emit('player_left', { id: socket.id });
+            }
+        }
+    });
+
     socket.on('disconnect', () => {
         console.log('User disconnected:', socket.id);
         for (const [roomCode, room] of rooms.entries()) {
