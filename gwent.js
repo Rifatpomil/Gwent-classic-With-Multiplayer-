@@ -615,14 +615,22 @@ class Player {
 	
 	// Use a leader's Activate ability, then disable the leader
 	async activateLeader() {
+		this.disableLeader();
 		if (this === player_me && network.isMultiplayer) {
 			network.sendMove({ type: 'activate_leader' });
+		}
+		// Close the leader preview carousel before running the ability.
+		// activateLeader() is called from inside the viewCard carousel's select() handler,
+		// so Carousel.curr is still set. If the ability opens its own carousel (e.g. emhyr_emperor
+		// showing opponent's cards), the new carousel gets queued behind the old one → deadlock.
+		if (Carousel.curr) {
+			Carousel.curr.cancelled = true;
+			Carousel.curr.exit();
 		}
 		ui.showPreviewVisuals(this.leader);
 		await sleep(1500);
 		ui.hidePreview(this.leader);
 		await this.leader.activated[0](this.leader, this);
-		this.disableLeader();
 		this.endTurn();
 	}
 	
@@ -679,15 +687,16 @@ class CardContainer {
 	}
 	
 	// Returns a list of up to n cards that satisfy the predicate. Does not modify container.
+	// Uses local random to avoid polluting the network random queue for non-synced operations (like viewing or AI)
 	findCardsRandom(predicate, n){
 		let valid = predicate ? this.cards.filter(predicate) : this.cards;
 		if (valid.length === 0)
 			return [];
 		if (!n || n === 1)
-			return [valid[randomInt(valid.length)]];
+			return [valid[Math.floor(Math.random() * valid.length)]];
 		let out = [];
 		for (let i=Math.min(n, valid.length); i>0 ; --i){
-			let index = randomInt(valid.length);
+			let index = Math.floor(Math.random() * valid.length);
 			out.push( valid.splice(index,1)[0] );
 		}
 		return out;
@@ -745,7 +754,7 @@ class CardContainer {
 	// Adds a card to a random index of the CardContainer
 	addCardRandom(card){
 		this.cards.push(card);
-		let index = randomInt(this.cards.length);
+		let index = Math.floor(Math.random() * this.cards.length);
 		if (index !== this.cards.length-1) {
 			let t = this.cards[this.cards.length-1];
 			this.cards[this.cards.length-1] = this.cards[index];
@@ -1246,37 +1255,46 @@ class Board {
 	}
 	
 	// Sends and translates a card from the source to the Deck of the card's holder
-	async toDeck(card, source){
-		await this.moveTo(card, "deck", source);
+	async toDeck(card, source, instant){
+		await this.moveTo(card, "deck", source, instant);
 	}
 	
 	// Sends and translates a card from the source to the Grave of the card's holder
-	async toGrave(card, source){
-		await this.moveTo(card, "grave", source);
+	async toGrave(card, source, instant){
+		await this.moveTo(card, "grave", source, instant);
 	}
 
 	// Sends and translates a card from the source to the Hand of the card's holder
-	async toHand(card, source) {
-		await this.moveTo(card, "hand", source);
+	async toHand(card, source, instant) {
+		await this.moveTo(card, "hand", source, instant);
 	}
 
 	// Sends and translates a card from the source to Weather
-	async toWeather(card, source) {
-		await this.moveTo(card, weather, source);
+	async toWeather(card, source, instant) {
+		await this.moveTo(card, weather, source, instant);
 	}
 	
 	// Sends and translates a card from the source to the Deck of the card's combat row
-	async toRow(card, source) {
+	async toRow(card, source, instant) {
 		let row = (card.row === "agile") ? "close" : card.row ? card.row : "close";
-		await this.moveTo(card, row, source);
+		await this.moveTo(card, row, source, instant);
 	}
 	
 	// Sends and translates a card from the source to a specified row name or CardContainer
-	async moveTo(card, dest, source) {
+	async moveTo(card, dest, source, instant) {
 		if (isString(dest))
 			dest = this.getRow(card, dest);
-		await translateTo(card, source ? source : null, dest);
-		await dest.addCard(source ? source.removeCard(card) : card);
+		if (instant) {
+			dest.addCard(source ? source.removeCard(card) : card);
+		} else {
+			await translateTo(card, source ? source : null, dest);
+			await dest.addCard(source ? source.removeCard(card) : card);
+		}
+	}
+	
+	// Sends and translates a card from the source to a specified row name or CardContainer without animations
+	async moveToInstant(card, dest, source) {
+		await this.moveTo(card, dest, source, true);
 	}
 	
 	// Sends and translates a card from the source to a row name associated with the passed player
@@ -1340,7 +1358,9 @@ class Game {
 		this.opponentReady = false;
 		this.meDeckSynced = false;
 		this.opDeckSynced = false;
-		
+		this.leaderTurnFinished = false;
+		this.skelligeChoices = [null, null];
+		this.monstersChoice = [null, null];
 		weather.reset();
 		board.row.forEach(r => r.reset());
 	}
@@ -1599,6 +1619,12 @@ class Game {
 			return;
 		}
 		this.isReplay = true;
+		
+		// Clear random queue before restart to ensure fresh start
+		if (network.isMultiplayer) {
+			network.randomQueue = [];
+		}
+		
 		this.reset();
 		player_me.reset();
 		player_op.reset();
@@ -1607,8 +1633,8 @@ class Game {
 		if (network.isMultiplayer) {
 			if (network.playerIndex === 0) {
 				// Host: re-sync deck order to guest after replay reset.
-				// Each client shuffles independently via addCardRandom(), so decks
-				// diverge without this. Send the host's deck order as ground truth.
+				// Decks are initialized with local random, so they diverge.
+				// Host sends their deck order as ground truth.
 				[player_me, player_op].forEach(player => {
 					const indices = player.deck.cards.map(c => card_dict.findIndex(cd => cd.name === c.name));
 					const playerAbsIndex = (player === player_me) ? network.playerIndex : 1 - network.playerIndex;
@@ -1616,10 +1642,11 @@ class Game {
 				});
 				this.meDeckSynced = true;
 				this.opDeckSynced = true;
+			} else {
+				// Guest: flags stay false — startGame() will wait for host's sync_deck.
+				this.meDeckSynced = false;
+				this.opDeckSynced = false;
 			}
-			// Guest: flags stay false — startGame() will wait for host's sync_deck.
-			// No deadlock: JS is single-threaded, so the guest finishes resetting
-			// before the event loop processes the host's sync_deck messages.
 		}
 		
 		this.endScreen.classList.add("hide");
@@ -2046,11 +2073,13 @@ class UI {
 	// Suspends gameplay until the Carousel is closed. Automatically picks random card if activated for AI player
 	async queueCarousel(container, count, action, predicate, bSort, bQuit, title){
 		if (game.currPlayer === player_op) {
-			if (player_op.controller instanceof ControllerAI)
+			if (player_op.controller instanceof ControllerAI) {
 				for (let i=0; i<count; ++i){
-					let cards = container.cards.reduce((a,c,i) => !predicate || predicate(c) ? a.concat([i]) : a, []);
-					await action(container, cards[randomInt(cards.length)]);
+					let indices = container.cards.reduce((a,c,i) => !predicate || predicate(c) ? a.concat([i]) : a, []);
+					if (indices.length > 0)
+						await action(container, indices[randomInt(indices.length)]);
 				}
+			}
 			return;
 		}
 		let carousel = new Carousel(container, count, action, predicate, bSort, bQuit, title);
@@ -2058,7 +2087,6 @@ class UI {
 			carousel.start();
 		else {
 			this.carousels.push(carousel);
-			return;
 		}
 		await sleepUntil( () => this.carousels.length === 0 && !Carousel.curr, 100);
 	}

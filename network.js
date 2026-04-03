@@ -255,6 +255,70 @@ class ControllerRemote {
                 break;
             }
 
+            case 'leader_grave_to_hand': {
+                const targetPlayer = (move.isOpponentGrave) ? this.player.opponent() : this.player;
+                const card = targetPlayer.grave.cards.find(c => c.name === move.cardName);
+                if (card) {
+                    card.holder = this.player;
+                    await board.toHand(card, targetPlayer.grave);
+                }
+                break;
+            }
+
+            case 'leader_deck_to_hand': {
+                const card = this.player.deck.cards.find(c => c.name === move.cardName);
+                if (card) {
+                    await board.toHand(card, this.player.deck);
+                }
+                break;
+            }
+
+            case 'leader_deck_to_weather': {
+                const card = this.player.deck.cards.find(c => c.name === move.cardName);
+                if (card) {
+                    await board.toWeather(card, this.player.deck);
+                }
+                break;
+            }
+
+            case 'leader_discard': {
+                const card = this.player.hand.cards.find(c => c.name === move.cardName);
+                if (card) {
+                    await board.toGrave(card, this.player.hand);
+                }
+                break;
+            }
+
+            case 'leader_emperor': {
+                // Emhyr Emperor: host sends which indices were looked at to keep random state synced
+                // but only if we want to ensure exact same cards are shown (optional but good)
+                if (network.playerIndex !== 0 && move.indices) {
+                    // Sync random queue if needed, but emperor doesn't change state so it's less critical
+                }
+                break;
+            }
+
+            case 'leader_finish_turn': {
+                game.leaderTurnFinished = true;
+                break;
+            }
+
+            case 'skellige_ability': {
+                // Skellige faction ability: host sends choices for a specific player
+                if (network.playerIndex !== 0) {
+                    game.skelligeChoices[move.playerAbsIndex] = move.choices;
+                }
+                break;
+            }
+
+            case 'monsters_ability': {
+                // Monsters faction ability: host sends choice for a specific player
+                if (network.playerIndex !== 0) {
+                    game.monstersChoice[move.playerAbsIndex] = move.choice;
+                }
+                break;
+            }
+
             case 'decoy': {
                 //  Use rowName to find the correct row, then find the card in it
                 let targetCard = null;

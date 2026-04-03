@@ -19,11 +19,33 @@ var factions = {
 	monsters: {
 		name: "Monsters",
 		factionAbility: player => game.roundEnd.push( async () => {
-			let units = board.row.filter( (r,i) => player === player_me ^ i < 3)
+			let isMe = (player === player_me);
+			let units = board.row.filter( (r,i) => isMe ? i >= 3 : i < 3)
 				.reduce((a,r) => r.cards.filter(c => c.isUnit()).concat(a), []);
 			if (units.length === 0)
 				return;
-			let card = units[await asyncRandomInt(units.length)];
+			
+			let card;
+			const playerAbsIndex = (player === player_me) ? network.playerIndex : 1 - network.playerIndex;
+
+			if (network.isMultiplayer) {
+				if (network.playerIndex === 0) {
+					// Host picks and sends to guest
+					let idx = Math.floor(Math.random() * units.length);
+					card = units[idx];
+					network.sendMove({ type: 'monsters_ability', choice: card.name, playerAbsIndex: playerAbsIndex });
+				} else {
+					// Guest waits for host's choice for this specific player
+					while (!game.monstersChoice[playerAbsIndex]) await sleep(50);
+					card = units.find(c => c.name === game.monstersChoice[playerAbsIndex]);
+					game.monstersChoice[playerAbsIndex] = null;
+				}
+			} else {
+				card = units[Math.floor(Math.random() * units.length)];
+			}
+
+			if (!card) return; // Should not happen if in sync
+
 			card.noRemove = true;
 			game.roundStart.push( async () => {
 				await ui.notification("monsters", 1200);
@@ -74,14 +96,47 @@ var factions = {
 			if (game.roundCount != 3)
 				return false;
 			await ui.notification("skellige-" + player.tag, 1200);
-			// Use async random for multiplayer sync
+			
 			let graveUnits = player.grave.findCards(c => c.isUnit());
 			let chosen = [];
-			for (let i = Math.min(2, graveUnits.length); i > 0; --i) {
-				let idx = await asyncRandomInt(graveUnits.length);
-				chosen.push(graveUnits.splice(idx, 1)[0]);
+			const count = Math.min(2, graveUnits.length);
+			const playerAbsIndex = (player === player_me) ? network.playerIndex : 1 - network.playerIndex;
+
+			if (network.isMultiplayer) {
+				if (network.playerIndex === 0) {
+					// Host picks and sends names to guest for this specific player
+					for (let i = count; i > 0; --i) {
+						let idx = Math.floor(Math.random() * graveUnits.length);
+						chosen.push(graveUnits.splice(idx, 1)[0]);
+					}
+					network.sendMove({ 
+						type: 'skellige_ability', 
+						choices: chosen.map(c => c.name), 
+						playerAbsIndex: playerAbsIndex 
+					});
+				} else {
+					// Guest waits for host's choice for this specific player
+					while (!game.skelligeChoices[playerAbsIndex]) await sleep(50);
+					for (const name of game.skelligeChoices[playerAbsIndex]) {
+						let card = graveUnits.find(c => c.name === name);
+						if (card) {
+							chosen.push(card);
+							graveUnits.splice(graveUnits.indexOf(card), 1);
+						}
+					}
+					game.skelligeChoices[playerAbsIndex] = null;
+				}
+			} else {
+				for (let i = count; i > 0; --i) {
+					let idx = Math.floor(Math.random() * graveUnits.length);
+					chosen.push(graveUnits.splice(idx, 1)[0]);
+				}
 			}
-			await Promise.all(chosen.map(c => board.toRow(c, player.grave)));
+
+			// Use for...of to ensure sequential execution and proper awaiting of each move
+			for (const c of chosen) {
+				await board.toRow(c, player.grave);
+			}
 			return true;
 		}),
 		description: "2 random cards from the graveyard are placed on the battlefield at the start of the third round."

@@ -235,10 +235,35 @@ var ability_dict = {
 		activated: async card => {
 			if (card.holder.controller instanceof ControllerAI)
 				return;
+			if (card.holder.controller instanceof ControllerRemote) {
+				// Opponent side: wait for attacker to finish looking
+				if (network.isMultiplayer) {
+					await sleepUntil(() => game.leaderTurnFinished, 100);
+					game.leaderTurnFinished = false;
+				}
+				return;
+			}
+			// Local player: pick cards and view
 			let container = new CardContainer();
 			container.cards = card.holder.opponent().hand.findCardsRandom(() => true, 3);
-			Carousel.curr.cancel();
+			if (container.cards.length === 0) {
+				if (network.isMultiplayer) {
+					network.sendMove({ type: 'leader_finish_turn' });
+				}
+				return;
+			}
+			
+			// Optional: sync with opponent that we looked at cards (doesn't change state, just for info)
+			if (network.isMultiplayer) {
+				network.sendMove({
+					type: 'leader_emperor',
+					cardIndices: container.cards.map(c => card.holder.opponent().hand.cards.indexOf(c))
+				});
+			}
 			await ui.viewCardsInContainer(container);
+			if (network.isMultiplayer) {
+				network.sendMove({ type: 'leader_finish_turn' });
+			}
 		},
 		weight: card => {
 			let count = card.holder.opponent().hand.cards.length;
@@ -260,12 +285,30 @@ var ability_dict = {
 				await board.toHand(newCard, grave);
 				return;
 			}
-			Carousel.curr.cancel();
-			await ui.queueCarousel(grave, 1, (c,i) => {
+			if (card.holder.controller instanceof ControllerRemote) {
+				// Remote player: wait for attacker to finish picking a card
+				if (network.isMultiplayer) {
+					await sleepUntil(() => game.leaderTurnFinished, 100);
+					game.leaderTurnFinished = false;
+				}
+				return;
+			}
+			if (Carousel.curr) Carousel.curr.cancel();
+			await ui.queueCarousel(grave, 1, async (c, i) => {
 				let newCard = c.cards[i];
 				newCard.holder = card.holder;
-				board.toHand(newCard, grave);
+				if (network.isMultiplayer) {
+					network.sendMove({
+						type: 'leader_grave_to_hand',
+						cardName: newCard.name,
+						isOpponentGrave: true
+					});
+				}
+				await board.toHand(newCard, grave);
 			}, c => c.isUnit(), true);
+			if (network.isMultiplayer) {
+				network.sendMove({ type: 'leader_finish_turn' });
+			}
 		},
 		weight: (card, ai, max, data) => ai.weightMedic(data, 0, card.holder.opponent())
 	},
@@ -285,12 +328,31 @@ var ability_dict = {
 			let newCard;
 			if (card.holder.controller instanceof ControllerAI) {
 				newCard = card.holder.controller.medic(card, card.holder.grave)
+			} else if (card.holder.controller instanceof ControllerRemote) {
+				// Remote player: wait for attacker to finish picking a card
+				if (network.isMultiplayer) {
+					await sleepUntil(() => game.leaderTurnFinished, 100);
+					game.leaderTurnFinished = false;
+				}
+				return;
 			} else {
-				Carousel.curr.exit();
-				await ui.queueCarousel(card.holder.grave, 1, (c,i) => newCard = c.cards[i], c => c.isUnit(), false, false);
+				if (Carousel.curr) Carousel.curr.exit();
+				await ui.queueCarousel(card.holder.grave, 1, async (c, i) => {
+					newCard = c.cards[i];
+					if (network.isMultiplayer && newCard) {
+						network.sendMove({
+							type: 'leader_grave_to_hand',
+							cardName: newCard.name,
+							isOpponentGrave: false
+						});
+					}
+					if (newCard)
+						await board.toHand(newCard, card.holder.grave);
+				}, c => c.isUnit(), false, false);
+				if (network.isMultiplayer) {
+					network.sendMove({ type: 'leader_finish_turn' });
+				}
 			}
-			if (newCard)
-				await board.toHand(newCard, card.holder.grave);
 		},
 		weight: (card, ai, max, data) => ai.weightMedic(data, 0, card.holder)
 	},
@@ -304,10 +366,39 @@ var ability_dict = {
 				await Promise.all(cards.map(async c => await board.toGrave(c, card.holder.hand)));
 				card.holder.deck.draw(card.holder.hand);
 				return;
-			} else
-				Carousel.curr.exit();
-			await ui.queueCarousel(hand, 2, (c,i) => board.toGrave(c.cards[i], c), () => true);
-			await ui.queueCarousel(deck, 1, (c,i) => board.toHand(c.cards[i], deck), () => true, true);
+			} else if (card.holder.controller instanceof ControllerRemote) {
+				// Remote player: wait for attacker to finish discarding/drawing
+				if (network.isMultiplayer) {
+					await sleepUntil(() => game.leaderTurnFinished, 100);
+					game.leaderTurnFinished = false;
+				}
+				return;
+			} else {
+				if (Carousel.curr) Carousel.curr.exit();
+				await ui.queueCarousel(hand, 2, async (c, i) => {
+					const discarded = c.cards[i];
+					if (network.isMultiplayer) {
+						network.sendMove({
+							type: 'leader_discard',
+							cardName: discarded.name
+						});
+					}
+					await board.toGrave(discarded, c);
+				}, () => true);
+				await ui.queueCarousel(deck, 1, async (c, i) => {
+					const drawn = c.cards[i];
+					if (network.isMultiplayer) {
+						network.sendMove({
+							type: 'leader_deck_to_hand',
+							cardName: drawn.name
+						});
+					}
+					await board.toHand(drawn, deck);
+				}, () => true, true);
+				if (network.isMultiplayer) {
+					network.sendMove({ type: 'leader_finish_turn' });
+				}
+			}
 		},
 		weight: (card, ai) => {
 			let cards = ai.discardOrder(card).splice(0,2).filter(c => c.basePower < 7);
@@ -322,9 +413,28 @@ var ability_dict = {
 			let deck = board.getRow(card, "deck", card.holder);
 			if (card.holder.controller instanceof ControllerAI) {
 				await ability_dict["eredin_king"].helper(card).card.autoplay(card.holder.deck);
+			} else if (card.holder.controller instanceof ControllerRemote) {
+				// Remote player: wait for attacker to finish picking a weather card
+				if (network.isMultiplayer) {
+					await sleepUntil(() => game.leaderTurnFinished, 100);
+					game.leaderTurnFinished = false;
+				}
+				return;
 			} else {
-				Carousel.curr.cancel();
-				await ui.queueCarousel(deck, 1, (c,i) => board.toWeather(c.cards[i], deck), c => c.faction === "weather", true);
+				if (Carousel.curr) Carousel.curr.cancel();
+				await ui.queueCarousel(deck, 1, async (c, i) => {
+					const weatherCard = c.cards[i];
+					if (network.isMultiplayer) {
+						network.sendMove({
+							type: 'leader_deck_to_weather',
+							cardName: weatherCard.name
+						});
+					}
+					await board.toWeather(weatherCard, deck);
+				}, c => c.faction === "weather", true);
+				if (network.isMultiplayer) {
+					network.sendMove({ type: 'leader_finish_turn' });
+				}
 			}
 		},
 		weight: (card, ai, max) => ability_dict["eredin_king"].helper(card).weight,
@@ -401,8 +511,40 @@ var ability_dict = {
 	crach_an_craite: {
 		description: "Shuffle all cards from each player's graveyard back into their decks.",
 		activated: async card => {
-			Promise.all(card.holder.grave.cards.map(c => board.toDeck(c, card.holder.grave)));
-			await Promise.all(card.holder.opponent().grave.cards.map(c => board.toDeck(c, card.holder.opponent().grave)));
+			// Both clients must move cards from graveyard to deck to keep graveyards in sync
+			// The host will then send a sync_deck message to ensure the final deck order is identical
+			
+			// Show notification first
+			await ui.notification("crach_an_craite", 1200);
+			
+			// Move cards instantly to avoid long animation hangs in multiplayer
+			const myGrave = [...card.holder.grave.cards];
+			const opGrave = [...card.holder.opponent().grave.cards];
+			
+			for (const c of myGrave) {
+				await board.toDeck(c, card.holder.grave, true);
+			}
+			for (const c of opGrave) {
+				await board.toDeck(c, card.holder.opponent().grave, true);
+			}
+
+			if (typeof network !== 'undefined' && network.isMultiplayer) {
+				if (card.holder.controller instanceof ControllerRemote) {
+					// Remote player activated this — wait for them to finish and sync decks
+					await sleepUntil(() => game.leaderTurnFinished, 100);
+					game.leaderTurnFinished = false;
+				} else {
+					// Local player activated this — host syncs deck order; guest waits for sync_deck messages
+					if (network.playerIndex === 0) {
+						[card.holder, card.holder.opponent()].forEach(player => {
+							const indices = player.deck.cards.map(c => card_dict.findIndex(cd => cd.name === c.name));
+							const playerAbsIndex = (player === player_me) ? network.playerIndex : 1 - network.playerIndex;
+							network.sendMove({ type: 'sync_deck', playerAbsIndex: playerAbsIndex, indices: indices });
+						});
+					}
+					network.sendMove({ type: 'leader_finish_turn' });
+				}
+			}
 		},
 		weight: (card, ai, max, data) => {
 			if( game.roundCount < 2)
